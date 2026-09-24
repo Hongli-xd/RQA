@@ -100,9 +100,20 @@ def spearman(xs, ys) -> float:
     return pearson(rk(xs), rk(ys))
 
 
+_INC_CACHE: dict[str, list] = {}
+
+
 def load_incarnations(trace: Path):
     """(batch_ts, role, key, alpha) per real read. role/key are label columns and
-    are handed only to the eval half."""
+    are handed only to the eval half.
+
+    Cached by path: the tau sweep, the shuffled-alpha null and the
+    spike-robustness arms all re-read the same file, which is free at the S1
+    scale and half an hour of I/O at the paper's medium batch size.
+    """
+    hit = _INC_CACHE.get(str(trace))
+    if hit is not None:
+        return hit
     wtime: dict[str, int] = {}
     out = []
     with trace.open() as fh:
@@ -117,6 +128,7 @@ def load_incarnations(trace: Path):
             w = wtime.get(sk)
             if w is not None:
                 out.append((t, row["role"], int(row["logical_key"].split("/")[1]), t - w))
+    _INC_CACHE[str(trace)] = out
     return out
 
 
