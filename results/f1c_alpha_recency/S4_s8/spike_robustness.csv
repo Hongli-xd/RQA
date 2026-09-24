@@ -1,0 +1,5 @@
+tau,window,label,E1_frac_rho,E2_excess_rho
+40,50-50,narrowed (leaks fakes),0.03,0.315
+40,49-51,self-calibrated,0.662,0.315
+40,48-52,widened,0.729,0.315
+40,45-58,very wide,0.714,0.315
