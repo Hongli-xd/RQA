@@ -8,6 +8,14 @@
 - B_hat=128.0 (truth 128); real budget=114.0 (truth 112); f_D_hat=14 (truth 16)
 - flush age mode alpha=81 window=[80, 83] (fakes self-identify); f_R_mean=79.6; entangled=False
 
+## Stage B - episode detection
+- detected 77 episodes (truth 80.0): P=0.95 R=0.91 F1=0.93 IoU=0.47
+- false-positive batches: 0
+
+## Stage C - cardinality
+- MAE vs visible target=8.4, median rel err=0.080, worst=0.575
+- cached re-read components are invisible (mean undercount vs raw m: -6.4)
+
 ## Maximum-leakage statement supported by this run
 - Passively (storage ids + batch timing only, order-hidden) the server
   recovers: batch anatomy (B, real budget, f_D, flush age), the
