@@ -38,7 +38,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "experiments" / "range_query_attack.py"
 OUTROOT = ROOT / "results" / "rqa_topconf"
 
-# Gap choice -> bucket label used by the attack's boundary curve.
+# Gap choice -> bucket label used by the attack's boundary curve (legacy
+# format; newer states record per-gap keys like "45" directly).
 GAP_OF_BUCKET = {
     "0-30": 20,
     "31-60": 45,
@@ -46,6 +47,18 @@ GAP_OF_BUCKET = {
     "121-240": 200,
     "240+": 400,
 }
+
+
+def gap_of_key(key: str) -> float | None:
+    """Numeric gap value of a boundary key: legacy bucket label or the
+    per-gap format '45' introduced with the dense-grid refinement."""
+    gap = GAP_OF_BUCKET.get(key)
+    if gap is not None:
+        return float(gap)
+    try:
+        return float(key)
+    except ValueError:
+        return None
 
 BASE_MEDIUM = dict(
     n_dummy=70_000,
@@ -179,7 +192,7 @@ def window_estimate(boundary: dict) -> tuple[float, float]:
     below = math.inf
     above = 0.0
     for bucket, (n_pair, hit) in boundary.items():
-        gap = GAP_OF_BUCKET.get(bucket)
+        gap = gap_of_key(bucket)
         if gap is None or n_pair == 0:
             continue
         rate = hit / n_pair
@@ -238,13 +251,13 @@ def aggregate() -> None:
                 pooled.setdefault(bucket, [0, 0])
                 pooled[bucket][0] += n_pair
                 pooled[bucket][1] += hit
-        for bucket in sorted(pooled, key=lambda b: GAP_OF_BUCKET.get(b, 0)):
+        for bucket in sorted(pooled, key=lambda b: gap_of_key(b) or 0):
             n_pair, hit = pooled[bucket]
             lo, hi = wilson(hit, n_pair)
             curve_rows.append({
                 "config": cfg["name"],
                 "gap_bucket": bucket,
-                "gap_tested": GAP_OF_BUCKET.get(bucket, ""),
+                "gap_tested": gap_of_key(bucket) or "",
                 "pairs": n_pair,
                 "recovered": hit,
                 "rate": round(hit / n_pair, 3) if n_pair else "",

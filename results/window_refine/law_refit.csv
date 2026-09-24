@@ -1,0 +1,6 @@
+config,seed,flush_age,sweep_theory,window_old_grid,window_dense_quant,f1
+S1_n8k,7,81,88.3,45,65,0.855
+S1_n8k,8,81,87.3,45,80,0.902
+S1_n8k,9,81,87.3,45,65,0.803
+S2_n200k,7,102,99.8,90,80,0.822
+S3_n500k,7,255,256.1,200,220,0.833

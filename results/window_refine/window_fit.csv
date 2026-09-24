@@ -1,0 +1,4 @@
+config,n_runs,n_pairs,window_quant_dense,monotonicity_violations,clean_sigmoid,fit_kind,separation_interval,w,k,w_boot_mean,w_ci95_lo,w_ci95_hi,n_boot_failed
+S1_n8k,3,179,65,25(10/12)->35(13/13),False,converged,,76.3,0.1048,75.9,69.4,80.7,0
+S2_n200k,1,52,80,none,False,capped,"(107,110)",108.5,13.0019,106.0,93.2,111.6,0
+S3_n500k,1,46,220,none,False,capped,"(232,312)",272.0,0.5518,271.2,224.0,310.6,55
