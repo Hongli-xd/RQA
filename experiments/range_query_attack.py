@@ -367,7 +367,9 @@ def build_incarnations(events: Sequence[dict[str, object]]) -> Incarnations:
     return inc
 
 
-def stage_a_anatomy(inc: Incarnations) -> dict[str, object]:
+def stage_a_anatomy(
+    inc: Incarnations, track_span: int = 80, flush_frac: float = 0.08
+) -> dict[str, object]:
     """Passive batch anatomy from alpha timing only.
 
     Channels (all server-visible):
@@ -439,7 +441,6 @@ def stage_a_anatomy(inc: Incarnations) -> dict[str, object]:
     tracked_batches = sorted(reads_by_batch)
     hist: Counter[int] = Counter()
     trailing: list[tuple[int, Counter[int]]] = []
-    track_span = 80
     miss_by_batch: dict[int, int] = {}
     flush_counts: list[int] = []
     flush_span: list[int] = []
@@ -458,7 +459,7 @@ def stage_a_anatomy(inc: Incarnations) -> dict[str, object]:
         # Relative window: at large B the fake-alpha spread scales with the
         # flush age itself, so a fixed +-3 window under-captures fakes and
         # injects O(f_R) noise into the miss series.
-        half_width = max(3, int(round(0.08 * mode_t)))
+        half_width = max(3, int(round(flush_frac * mode_t)))
         window = (mode_t - half_width, mode_t + half_width)
         flush_n = sum(
             1 for r in reads_by_batch[b] if window[0] <= r.alpha <= window[1]
@@ -620,7 +621,6 @@ def stage_b_detect_episodes(
         return kept, float(sum(len(ep) for ep in kept))
 
     detected, flagged_mass = detect(features)
-    detected, flagged_mass = detect(features)
     fp_batches = 0.0
     if control_features:
         _, control_flagged = detect(control_features)
@@ -637,6 +637,7 @@ def stage_c_cardinality(
     episodes: Sequence[Sequence[int]],
     features: dict[int, dict[str, float]],
     control_features: dict[int, dict[str, float]] | None = None,
+    local_bg: int = 40,
 ) -> list[dict[str, float]]:
     """Estimate matched-record count m per detected episode.
 
@@ -653,7 +654,7 @@ def stage_c_cardinality(
         outside = [
             features[b]["miss"]
             for b in batches_sorted
-            if lo - 40 <= b <= hi + 40 and b not in set(ep)
+            if lo - local_bg <= b <= hi + local_bg and b not in set(ep)
         ]
         bg_local = median(outside) if outside else 0.0
         miss = sum(features[b]["miss"] for b in ep)
@@ -680,6 +681,8 @@ def stage_d_tracking(
     control_inc: Incarnations,
     min_pair_mass: float = 8.0,
     bg_confidence: float = 10.0,
+    max_cell: float = 4.0,
+    eviction_tail: int = 15,
 ) -> dict[str, object]:
     """Cross-incarnation tracking by exact timing arithmetic.
 
@@ -731,7 +734,6 @@ def stage_d_tracking(
     # batches AFTER its drain span (LRU tail), so a parent batch belongs to
     # the nearest preceding episode whose span ended within EVICTION_TAIL.
     # TAIL is an attack-side parameter (cache turnover window), not truth.
-    eviction_tail = 15
     sorted_spans = sorted(
         ((min(batches), max(batches), ep_id) for ep_id, batches in enumerate(episodes)),
         key=lambda x: x[1],
@@ -790,11 +792,11 @@ def stage_d_tracking(
     for (i, j), per_dist in episode_pair_cells_mass.items():
         per_cell = [c for c in per_dist.values()]
         mass = sum(per_cell)
-        max_cell = max(per_cell)
+        cell_max = max(per_cell)
         # Concentration rule: a genuine re-query re-reads its overlap cohort
         # from the queue front, concentrating mass in a few (parent, child)
         # cells; background redraw chains disperse over the whole window.
-        if mass >= min_pair_mass and max_cell >= 4:
+        if mass >= min_pair_mass and cell_max >= max_cell:
             overlap[f"{i}->{j}"] = float(mass)
     return {
         "overlap_counts": dict(sorted(overlap.items())),
@@ -822,6 +824,8 @@ def permutation_null(
     seed: int,
     min_pair_mass: float = 8.0,
     bg_cell_mean: float = 0.0,
+    max_cell: float = 4.0,
+    eviction_tail: int = 15,
 ) -> dict[str, float]:
     """Randomized-parent null: reattribute every non-flavor read to a
     uniformly random earlier batch (destroying the timing link between a
@@ -836,7 +840,6 @@ def permutation_null(
     batch_list = sorted(b for b in inc.writes_at if b >= inc.transient_end)
     if not batch_list:
         return {"null_overlap_mean": 0.0, "null_overlap_max": 0.0, "trials": 0.0}
-    eviction_tail = 15
     sorted_spans = sorted(
         ((min(batches), max(batches), ep_id) for ep_id, batches in enumerate(episodes)),
         key=lambda x: x[1],
@@ -874,8 +877,8 @@ def permutation_null(
         for (i, j), per_dist in episode_pair_cells_mass.items():
             masses = list(per_dist.values())
             mass = sum(masses)
-            max_cell = max(masses)
-            if mass >= max(min_pair_mass, 8.0) and max_cell >= 4:
+            cell_max = max(masses)
+            if mass >= max(min_pair_mass, 8.0) and cell_max >= max_cell:
                 total += mass
         scores.append(total)
     return {
@@ -1188,6 +1191,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cold-threshold", type=int, default=300)
     parser.add_argument("--threshold-z", type=float, default=5.0)
     parser.add_argument("--null-trials", type=int, default=20)
+    # Attack-side hyperparameters (exposed for sensitivity analysis; the
+    # defaults equal the previously hard-coded values, so default runs are
+    # bit-for-bit reproducible with pre-parameterisation results).
+    parser.add_argument(
+        "--track-span", type=int, default=80,
+        help="Stage A: trailing batches for the rolling flush-mode tracker",
+    )
+    parser.add_argument(
+        "--flush-frac", type=float, default=0.08,
+        help="Stage A: flush half-window as a fraction of the tracked mode",
+    )
+    parser.add_argument(
+        "--local-bg", type=int, default=40,
+        help="Stage C: local background half-window (batches) around an episode",
+    )
+    parser.add_argument(
+        "--min-mass", type=float, default=30.0,
+        help="Stage B: sustained-excess minimum miss/cop/cold mass per episode",
+    )
+    parser.add_argument(
+        "--window", type=int, default=50,
+        help="Stage B: rolling robust-z half-window (batches)",
+    )
+    parser.add_argument(
+        "--gap", type=int, default=3,
+        help="Stage B: batch merge gap inside one detected episode",
+    )
+    parser.add_argument(
+        "--min-pair-mass", type=float, default=8.0,
+        help="Stage D: minimum aggregate mass for an episode-pair link",
+    )
+    parser.add_argument(
+        "--max-cell", type=int, default=4,
+        help="Stage D: minimum per-cell mass for the concentration rule",
+    )
+    parser.add_argument(
+        "--eviction-tail", type=int, default=15,
+        help=("Stage D / permutation null: batches after an episode span in "
+              "which its keys can still be evicted (same value used in both)"),
+    )
     parser.add_argument("--quick", action="store_true")
     parser.add_argument(
         "--stages",
@@ -1272,14 +1315,37 @@ def main() -> None:
     attack_inc = build_incarnations(load_events(attack_trace))
     control_inc = build_incarnations(load_events(control_trace))
     burst_inc = build_incarnations(load_events(burst_trace))
-    attack_anatomy = stage_a_anatomy(attack_inc)
-    control_anatomy = stage_a_anatomy(control_inc)
-    burst_anatomy = stage_a_anatomy(burst_inc)
+    attack_anatomy = stage_a_anatomy(
+        attack_inc, track_span=args.track_span, flush_frac=args.flush_frac
+    )
+    control_anatomy = stage_a_anatomy(
+        control_inc, track_span=args.track_span, flush_frac=args.flush_frac
+    )
+    burst_anatomy = stage_a_anatomy(
+        burst_inc, track_span=args.track_span, flush_frac=args.flush_frac
+    )
     attack_inc.transient_end = int(attack_anatomy["transient_end"])
     control_inc.transient_end = int(control_anatomy["transient_end"])
     burst_inc.transient_end = int(burst_anatomy["transient_end"])
 
-    state: dict[str, object] = {"config": cfg.__dict__, "stages_run": sorted(stages)}
+    state: dict[str, object] = {
+        "config": cfg.__dict__,
+        "stages_run": sorted(stages),
+        "attack_params": {
+            "track_span": args.track_span,
+            "flush_frac": args.flush_frac,
+            "local_bg": args.local_bg,
+            "min_mass": args.min_mass,
+            "window": args.window,
+            "gap": args.gap,
+            "min_pair_mass": args.min_pair_mass,
+            "max_cell": args.max_cell,
+            "eviction_tail": args.eviction_tail,
+            "threshold_z": args.threshold_z,
+            "cold_threshold": args.cold_threshold,
+            "requery_gaps": args.requery_gaps,
+        },
+    }
     report_lines: list[str] = [
         "# Range-Query Attack on Waffle (design-level, order-hidden, passive)",
         "",
@@ -1326,7 +1392,9 @@ def main() -> None:
             "",
         ]
     else:
-        anatomy = stage_a_anatomy(attack_inc)
+        anatomy = stage_a_anatomy(
+            attack_inc, track_span=args.track_span, flush_frac=args.flush_frac
+        )
 
     attack_feats = batch_features(attack_inc, anatomy, args.cold_threshold)
     control_feats = batch_features(control_inc, control_anatomy, args.cold_threshold)
@@ -1338,10 +1406,12 @@ def main() -> None:
     if "B" in stages:
         log("\n===== Stage B: range-episode detection =====")
         detected, b_stats = stage_b_detect_episodes(
-            attack_feats, control_feats, threshold_z=args.threshold_z
+            attack_feats, control_feats, threshold_z=args.threshold_z,
+            gap=args.gap, min_mass=args.min_mass, window=args.window,
         )
         burst_detected, _ = stage_b_detect_episodes(
-            burst_feats, control_feats, threshold_z=args.threshold_z
+            burst_feats, control_feats, threshold_z=args.threshold_z,
+            gap=args.gap, min_mass=args.min_mass, window=args.window,
         )
         truth = load_truth(attack_truth_path)
         b_eval = eval_b(detected, truth, reads_full)
@@ -1374,7 +1444,11 @@ def main() -> None:
     d_result: dict[str, object] = {}
     if "D" in stages:
         log("\n===== Stage D: cross-incarnation tracking =====")
-        d_result = stage_d_tracking(attack_inc, detected, control_inc)
+        d_result = stage_d_tracking(
+            attack_inc, detected, control_inc,
+            min_pair_mass=args.min_pair_mass, max_cell=args.max_cell,
+            eviction_tail=args.eviction_tail,
+        )
         d_eval = eval_d(d_result["unique_links"], reads_full)  # type: ignore[arg-type]
         state["stage_d"] = {
             "overlap_counts": d_result["overlap_counts"],
@@ -1407,7 +1481,9 @@ def main() -> None:
 
     if "C" in stages:
         log("\n===== Stage C: cardinality recovery =====")
-        c_rows = stage_c_cardinality(detected, attack_feats)
+        c_rows = stage_c_cardinality(
+            detected, attack_feats, local_bg=args.local_bg
+        )
         truth = load_truth(attack_truth_path)
         c_eval = eval_c(c_rows, detected, truth, reads_full)
         state["stage_c"] = {"rows": c_rows, "eval": c_eval}
@@ -1437,7 +1513,11 @@ def main() -> None:
         log("\n===== Stage E: range topology reconstruction =====")
         n_det = len(detected)
         if "D" not in stages:
-            d_result = stage_d_tracking(attack_inc, detected, control_inc)
+            d_result = stage_d_tracking(
+                attack_inc, detected, control_inc,
+                min_pair_mass=args.min_pair_mass, max_cell=args.max_cell,
+                eviction_tail=args.eviction_tail,
+            )
         overlap_counts = d_result.get("overlap_counts", {})  # type: ignore[union-attr]
         matrix = [[0.0] * n_det for _ in range(n_det)]
         for key, count in overlap_counts.items():  # type: ignore[union-attr]
@@ -1455,14 +1535,21 @@ def main() -> None:
         # trace. Volume matches, but no co-parent burst structure should mean
         # a near-empty overlap matrix.
         burst_detected, _ = stage_b_detect_episodes(
-            burst_feats, control_feats, threshold_z=args.threshold_z
+            burst_feats, control_feats, threshold_z=args.threshold_z,
+            gap=args.gap, min_mass=args.min_mass, window=args.window,
         )
-        d_burst = stage_d_tracking(burst_inc, burst_detected, control_inc)
+        d_burst = stage_d_tracking(
+            burst_inc, burst_detected, control_inc,
+            min_pair_mass=args.min_pair_mass, max_cell=args.max_cell,
+            eviction_tail=args.eviction_tail,
+        )
         burst_pair_mass = float(d_burst["burst_mass"])  # type: ignore[arg-type]
         null = permutation_null(
             attack_inc, detected, args.null_trials, args.seed,
             min_pair_mass=float(d_result.get("min_pair_mass", 8.0)),  # type: ignore[arg-type]
             bg_cell_mean=float(d_result.get("bg_cell_mean", 0.0)),  # type: ignore[arg-type]
+            max_cell=float(args.max_cell),
+            eviction_tail=args.eviction_tail,
         )
         total_est = sum(sum(row) for row in matrix)
         state["stage_e"] = {"eval": e_eval, "null": null, "matrix": matrix,

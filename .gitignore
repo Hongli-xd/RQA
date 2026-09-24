@@ -1,3 +1,7 @@
-results/
+# Large generated outputs (traces, truth dumps, logs) stay untracked.
+results/**
+!results/**/
+!results/**/*.md
+!results/**/*.csv
 __pycache__/
 *.pyc
