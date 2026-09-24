@@ -1103,8 +1103,13 @@ def eval_e(
                 tn += 1
         acc = (tp + tn) / max(1, tp + tn + fp + fn)
         best_acc = max(best_acc, acc)
-    # Gap-boundary curve over true deliberate pairs (overlap >= 30).
+    # Gap-boundary curve over true deliberate pairs (overlap >= 30),
+    # recorded at PER-GAP resolution on the actual inter-query gap (no
+    # quantisation into coarse buckets): gap -> [n_pair, n_recovered].
+    # boundary_pairs keeps the raw (gap, hit, overlap) triplets so that a
+    # continuous recovery curve can be fitted downstream.
     boundary: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    boundary_pairs: list[list[float]] = []
     for det_i in det_ids:
         for det_j in det_ids:
             if det_i >= det_j:
@@ -1114,11 +1119,10 @@ def eval_e(
             if ov < 30:
                 continue
             gap = starts[tj] - starts[ti]
-            bucket = "0-30" if gap <= 30 else "31-60" if gap <= 60 else \
-                "61-120" if gap <= 120 else "121-240" if gap <= 240 else "240+"
-            boundary[bucket][0] += 1
-            if matrix[det_i][det_j] > 0 or matrix[det_j][det_i] > 0:
-                boundary[bucket][1] += 1
+            hit = 1 if (matrix[det_i][det_j] > 0 or matrix[det_j][det_i] > 0) else 0
+            boundary[str(gap)][0] += 1
+            boundary[str(gap)][1] += hit
+            boundary_pairs.append([float(gap), float(hit), float(ov)])
     return {
         "scored_dim": float(len(det_ids)),
         "pearson": pear,
@@ -1129,7 +1133,9 @@ def eval_e(
         "pairs": float(len(flat_est)),
         "positive_pairs": float(sum(1 for v in flat_true if v > 0)),
         "estimated_positive_pairs": float(sum(1 for v in flat_est if v > 0)),
-        "boundary_by_gap": {k: tuple(v) for k, v in sorted(boundary.items())},
+        "boundary_by_gap": {k: tuple(v) for k, v in sorted(
+            boundary.items(), key=lambda kv: float(kv[0]))},
+        "boundary_pairs": boundary_pairs,
     }
 
 

@@ -3,5 +3,6 @@ results/**
 !results/**/
 !results/**/*.md
 !results/**/*.csv
+!results/**/*.txt
 __pycache__/
 *.pyc
