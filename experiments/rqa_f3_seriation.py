@@ -169,6 +169,33 @@ def concordance(order: list[int], true_start: dict[int, float]) -> float:
     return max(c, 1.0 - c)
 
 
+def time_order_baseline(rows, true_start, min_size: int = 4, null_draws: int = 400,
+                        rng=None):
+    """Order the episodes by DETECTION TIME and score that.
+
+    This is the arm that has to be reported next to every other one.  Detected
+    episode ids are assigned in batch order, so this ordering uses nothing but
+    the timeline Stage B already produces - no overlap graph, no magnitudes, no
+    seriation.  If a workload issues its range scans in value order, this
+    baseline alone scores 1.000, and any seriation result measured on it is
+    measuring the schedule rather than the leakage."""
+    nodes = sorted({int(r["parent"]) for r in rows} | {int(r["child"]) for r in rows})
+    if len(nodes) < min_size:
+        return {"components": 0, "nodes_ordered": 0, "max_comp": 0,
+                "concordance": None, "null_concordance": None, "above_null": None}
+    obs = concordance(nodes, true_start)
+    acc = 0.0
+    rng = rng or random.Random(0)
+    for _ in range(null_draws):
+        perm = nodes[:]
+        rng.shuffle(perm)
+        acc += concordance(perm, true_start)
+    null = acc / null_draws
+    return {"components": 1, "nodes_ordered": len(nodes), "max_comp": len(nodes),
+            "concordance": round(obs, 3), "null_concordance": round(null, 3),
+            "above_null": round(obs - null, 3)}
+
+
 def score_arm(rows, weight_key, keep, true_start, rng, shuffle=False,
               min_size: int = 4, null_draws: int = 400):
     nodes, edges = build(rows, weight_key, keep)
@@ -236,23 +263,51 @@ def main() -> None:
             true_start[int(r["parent"])] = r["parent_true_start"]
             true_start[int(r["child"])] = r["child_true_start"]
 
+        # The FULL true overlap graph (every truly overlapping pair, including
+        # those the attack never produced a candidate for). Without it the only
+        # available "oracle" is true pairs AMONG CANDIDATES, which the linkage
+        # window has already filtered - an oracle that inherits the very
+        # limitation the experiment is trying to isolate.
+        tg_path = d / "true_overlap_graph.csv"
+        true_graph = []
+        if tg_path.exists():
+            with tg_path.open() as fh:
+                true_graph = [{k: float(v) for k, v in r.items()} for r in csv.DictReader(fh)]
+        for r in true_graph:
+            true_start[int(r["det_a"])] = r["a_true_start"]
+            true_start[int(r["det_b"])] = r["b_true_start"]
+
         base_keep = lambda r: r["mass"] >= 8 and r["max_cell"] >= 4
         pois_keep = lambda r, t=th: (r["mass"] >= 8 and r["max_cell"] >= 4
                                      and r["poisson_z_max_cell"] >= t)
         oracle_keep = lambda r: r["label"] > 0
 
         arms = [
-            ("baseline gate, mass weights", "mass", base_keep, False),
-            ("baseline gate, topology only", "count", base_keep, False),
-            ("baseline gate, weights SHUFFLED (null)", "mass", base_keep, True),
-            ("poisson gate, excess weights", "excess_mass", pois_keep, False),
-            ("poisson gate, mass weights", "mass", pois_keep, False),
-            ("poisson gate, topology only", "count", pois_keep, False),
-            ("poisson gate, weights SHUFFLED (null)", "excess_mass", pois_keep, True),
-            ("ORACLE pairs, true overlap weights", "true_overlap", oracle_keep, False),
+            ("baseline gate, mass weights", rows, "mass", base_keep, False),
+            ("baseline gate, topology only", rows, "count", base_keep, False),
+            ("baseline gate, weights SHUFFLED (null)", rows, "mass", base_keep, True),
+            ("poisson gate, excess weights", rows, "excess_mass", pois_keep, False),
+            ("poisson gate, topology only", rows, "count", pois_keep, False),
+            ("poisson gate, weights SHUFFLED (null)", rows, "excess_mass", pois_keep, True),
+            # oracle restricted to what the attack could see: isolates the WINDOW
+            ("ORACLE among candidates", rows, "true_overlap", oracle_keep, False),
         ]
-        for name, wk, keep, sh in arms:
-            res = score_arm(rows, wk, keep, true_start, rng, shuffle=sh,
+        if true_graph:
+            # oracle over the FULL true graph: isolates the GEOMETRY
+            arms.append(("ORACLE full true graph", true_graph, "true_overlap",
+                         lambda r: True, False))
+        tb = time_order_baseline(rows, true_start, min_size=args.min_comp, rng=rng)
+        tb.update({"seed_dir": d.name, "arm": "TIME-ORDER baseline (no overlap used)",
+                   "poisson_threshold": round(th, 3)})
+        all_rows.append(tb)
+        for name, src, wk, keep, sh in arms:
+            if not src:
+                continue
+            src2 = src
+            if src is true_graph:
+                src2 = [{"parent": r["det_a"], "child": r["det_b"],
+                         "true_overlap": r["true_overlap"]} for r in true_graph]
+            res = score_arm(src2, wk, keep, true_start, rng, shuffle=sh,
                             min_size=args.min_comp)
             res.update({"seed_dir": d.name, "arm": name, "poisson_threshold": round(th, 3)})
             all_rows.append(res)
@@ -282,7 +337,7 @@ def main() -> None:
     by_arm = defaultdict(list)
     for r in all_rows:
         by_arm[r["arm"]].append(r)
-    for arm in [a[0] for a in arms]:
+    for arm in ["TIME-ORDER baseline (no overlap used)"] + [a[0] for a in arms]:
         sel = [r for r in by_arm[arm] if r["components"]]
         if not sel:
             lines.append(f"| {arm} | 0 | - | - | - | - |")
@@ -296,7 +351,16 @@ def main() -> None:
     lines += ["",
               "`pair concordance` counts node PAIRS ordered correctly, reflection-free;",
               "`permutation null` is the same statistic on random orders of the SAME",
-              "components, so `above null` is the only number that carries information.",
+              "components. The number that carries information is the gain over the",
+              "TIME-ORDER baseline, not over the permutation null: sorting episodes by",
+              "when they were detected costs the attacker nothing, and on a workload that",
+              "scans in value order it already scores 1.000.",
+              "",
+              "The two ORACLE arms answer different questions. `among candidates` keeps",
+              "true pairs only where the attack produced a candidate, so it inherits the",
+              "linkage window and isolates the WINDOW's effect. `full true graph` uses",
+              "every truly overlapping pair, so it isolates the workload GEOMETRY: if it",
+              "also fails, no amount of better estimation would have helped.",
               "",
               "Reading: the SHUFFLED arms are a second null - same components, same edges, the",
               "magnitudes permuted. The `topology only` arms show what unweighted overlap",

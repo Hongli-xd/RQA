@@ -146,6 +146,7 @@ def make_episodes(
     overlap_bias: float,
     mode: str,
     gaps: Sequence[int] = (20, 45, 90, 200),
+    shuffle_block: int = 10**9,
 ) -> list[Episode]:
     """Schedule episodes with controlled key-space geometry.
 
@@ -155,7 +156,18 @@ def make_episodes(
     uniform fraction in [0.2, 0.6] of the smaller range. True overlap is
     then bimodal (0 or large), so topology recovery is measurable without
     chance-overlap noise. mode='point_burst' picks random keys with the
-    same schedule and sizes (control c2)."""
+    same schedule and sizes (control c2).
+
+    mode='sliding': consecutive episodes WALK the key space, each overlapping
+    its predecessor by a uniform fraction in [0.3, 0.6], restarting at a new
+    random region when the walk reaches the end of the domain. The disjointness
+    of `range` mode makes the true overlap graph a set of small stars (a base
+    episode and its re-queries) no matter how wide the linkage window is, which
+    confounds any experiment asking whether the WINDOW is what prevents
+    reconstructing the arrangement of queried ranges. Sliding scans produce a
+    long path instead, so the two causes separate. `overlap_bias` and `gaps`
+    are not used in this mode - every consecutive pair overlaps by
+    construction."""
     episodes: list[Episode] = []
     used: list[tuple[int, int]] = []  # disjoint fresh intervals
     previous: list[Episode] = []
@@ -189,6 +201,47 @@ def make_episodes(
             r += 12
         taken_rounds.add(r)
         return r
+
+    if mode == "sliding":
+        # Build the walk in VALUE order first...
+        windows: list[tuple[int, int]] = []
+        pos = rng.randrange(0, max(1, n_real - m_max - 1))
+        prev_m = rng.randint(m_min, m_max)
+        for _ in fresh_rounds:
+            m = rng.randint(m_min, m_max)
+            frac = rng.uniform(0.3, 0.6)          # overlap with the predecessor
+            stride = max(1, int(prev_m * (1.0 - frac)))
+            pos = pos + stride
+            if pos + m >= n_real:                 # this scan ran off the end
+                pos = rng.randrange(0, max(1, n_real - m_max - 1))
+            windows.append((pos, m))
+            prev_m = m
+
+        # ...then decide WHEN each window is queried.  This matters more than it
+        # looks: if the walk is issued in value order, the episode's position in
+        # time IS its position in the value domain, and "sort by batch" recovers
+        # the arrangement perfectly without using any overlap information at all.
+        # An order-recovery result measured on such a workload measures nothing.
+        # `shuffle_block` decouples the two: 1 keeps the degenerate monotone
+        # scan (kept only for reproducing that artifact), len(windows) scrambles
+        # the issue order completely, and values in between interpolate, which
+        # is what sweeps the recoverable fraction against the linkage window.
+        order = list(range(len(windows)))
+        k = max(1, min(shuffle_block, len(order)))
+        if k > 1:
+            for b in range(0, len(order), k):
+                block = order[b:b + k]
+                rng.shuffle(block)
+                order[b:b + k] = block
+        episodes = []
+        for slot, w_idx in enumerate(order):
+            pos, m = windows[w_idx]
+            episodes.append(
+                Episode(slot, fresh_rounds[slot], pos, tuple(range(pos, pos + m)))
+            )
+        episodes.sort(key=lambda e: e.start_round)
+        return [Episode(i, e.start_round, e.range_start, e.keys)
+                for i, e in enumerate(episodes)]
 
     for start_round in fresh_rounds:
         m = rng.randint(m_min, m_max)
@@ -257,6 +310,7 @@ def run_experiment(
     warmup: int,
     bg_rate: int = 40,
     gaps: Sequence[int] = (20, 45, 90, 200),
+    shuffle_block: int = 10**9,
 ) -> Path:
     rng = random.Random(seed)
     episodes = (
@@ -271,6 +325,7 @@ def run_experiment(
             overlap_bias,
             mode,
             gaps=gaps,
+            shuffle_block=shuffle_block,
         )
         if mode != "control"
         else []
@@ -365,6 +420,43 @@ def build_incarnations(events: Sequence[dict[str, object]]) -> Incarnations:
             reads_at[batch].append(read)
     inc = Incarnations(reads, dict(writes_at), dict(reads_at), sorted(reads_at))
     return inc
+
+
+def build_incarnations_streaming(trace_path: Path) -> Incarnations:
+    """Same result as build_incarnations(load_events(path)), without ever
+    holding the event list.
+
+    `load_events` materialises one dict per trace row, which is fine at the S1
+    scale and fatal at the paper's medium batch size: 1800 batches x 2500 reads
+    plus as many writes is ~9M rows, and the intermediate list alone exhausts
+    the container before the attack starts. This reads the same whitelisted
+    columns straight into the incarnation index.
+
+    The field whitelist is applied here exactly as in `load_events`: only
+    event, batch_ts, direction and storage_key are ever touched.
+    """
+    write_batch_of: dict[str, int] = {}
+    writes_at: dict[int, list[str]] = defaultdict(list)
+    reads_at: dict[int, list[Read]] = defaultdict(list)
+    reads: list[Read] = []
+    with trace_path.open(newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            if row.get("event") != "storage_access":
+                continue
+            batch = int(row["batch_ts"])
+            key = row["storage_key"]
+            if row["direction"] == "write":
+                write_batch_of[key] = batch
+                writes_at[batch].append(key)
+            else:
+                written = write_batch_of.get(key)
+                if written is None:
+                    continue
+                read = Read(key, batch, batch - written, written)
+                reads.append(read)
+                reads_at[batch].append(read)
+    return Incarnations(reads, dict(writes_at), dict(reads_at), sorted(reads_at))
 
 
 def stage_a_anatomy(
@@ -1403,6 +1495,25 @@ def parse_args() -> argparse.Namespace:
         help="comma-separated subset of stages to run (default: all)",
     )
     parser.add_argument(
+        "--range-geometry",
+        choices=("disjoint", "sliding"),
+        default="disjoint",
+        help="key-space geometry of the range episodes. 'disjoint' (default) is "
+        "the published behaviour: fresh ranges never touch, re-queries overlap a "
+        "previous range. 'sliding' walks overlapping windows across the domain, "
+        "which is what a real range scan does and what an order-reconstruction "
+        "experiment needs - see make_episodes.",
+    )
+    parser.add_argument(
+        "--sliding-shuffle",
+        type=int,
+        default=10**9,
+        help="for --range-geometry sliding: block size for scrambling the order "
+        "in which the value-space windows are ISSUED. 1 reproduces the degenerate "
+        "monotone scan where batch order alone gives the value order; the default "
+        "scrambles it completely; values in between interpolate.",
+    )
+    parser.add_argument(
         "--paper-medium",
         action="store_true",
         help="use the Waffle paper's MEDIUM-security parameters (Table 2): "
@@ -1469,10 +1580,13 @@ def main() -> None:
                 cfg, mode, args.seed, outdir, every, args.m_min, args.m_max,
                 args.overlap_bias, warmup, bg_rate=args.bg_rate,
                 gaps=tuple(int(g) for g in args.requery_gaps.split(",")),
+                shuffle_block=args.sliding_shuffle,
             )
         return trace, truth
 
-    attack_trace, attack_truth_path = ensure_trace("range")
+    attack_trace, attack_truth_path = ensure_trace(
+        "sliding" if args.range_geometry == "sliding" else "range"
+    )
     control_trace, _ = ensure_trace("control")
     burst_trace, _ = ensure_trace("point_burst")
 

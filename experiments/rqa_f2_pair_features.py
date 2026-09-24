@@ -46,9 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from range_query_attack import (  # noqa: E402
     _episode_pair_cells,
     batch_features,
-    build_incarnations,
-    full_trace_reads,
-    load_events,
+    build_incarnations_streaming,
     load_truth,
     match_episodes,
     stage_a_anatomy,
@@ -80,10 +78,30 @@ def auc(pos: list[float], neg: list[float]) -> float:
     return (rank_sum - n1 * (n1 + 1) / 2.0) / (n1 * n0)
 
 
+def eval_reads_for_truth(trace: Path, truth: dict) -> list[dict[str, str]]:
+    """The subset of trace rows the episode matcher actually consults.
+
+    `full_trace_reads` materialises every row with every column, which at the
+    paper's medium batch size is ~9M rows and gets the process OOM-killed.
+    `true_episode_spans`, the only consumer here, reads exactly one thing: the
+    batches in which an EPISODE's keys were client-read. Filtering to those rows
+    is semantically identical for it and keeps the trace out of memory.
+    """
+    wanted = {f"real/{k}" for ep in truth["episodes"] for k in ep["keys"]}
+    out: list[dict[str, str]] = []
+    with trace.open(newline="") as fh:
+        for row in csv.DictReader(fh, delimiter="\t"):
+            if row["role"] == "client_real" and row["logical_key"] in wanted:
+                out.append({"role": "client_real",
+                            "logical_key": row["logical_key"],
+                            "batch_ts": row["batch_ts"]})
+    return out
+
+
 def pair_features(trace: Path, cold_threshold: int, eviction_tail: int,
                   threshold_z: float) -> tuple[dict, list, dict]:
     """Attack-side only: returns (features per pair, detected spans, anatomy)."""
-    inc = build_incarnations(load_events(trace))
+    inc = build_incarnations_streaming(trace)
     anatomy = stage_a_anatomy(inc)
     feats = batch_features(inc, anatomy, cold_threshold)
     detected, _ = stage_b_detect_episodes(feats, None, threshold_z=threshold_z)
@@ -211,7 +229,7 @@ def main() -> None:
     pairs, detected, anatomy = pair_features(
         args.trace, args.cold_threshold, args.eviction_tail, args.threshold_z)
     truth = load_truth(args.truth)
-    reads_full = full_trace_reads(args.trace)
+    reads_full = eval_reads_for_truth(args.trace, truth)
     _, matches = match_episodes(detected, truth, reads_full)
     true_of = {det: tru for det, tru, _ in matches}
     key_sets = [set(ep["keys"]) for ep in truth["episodes"]]
@@ -252,6 +270,31 @@ def main() -> None:
     with (args.outdir / "feature_auc.csv").open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(aucs[0].keys()))
         w.writeheader(); w.writerows(aucs)
+
+    # The FULL true overlap graph over matched episodes - every truly
+    # overlapping pair, including the ones the attack never produced a
+    # candidate for.  Downstream order-recovery needs this to tell two causes
+    # apart: a graph that is fragmented because the WORKLOAD's ranges are
+    # disjoint, and one that is fragmented because the linkage WINDOW hid the
+    # long-gap edges.  Eval-side data, written once, never read by an attack.
+    inv = {t: d for d, t in true_of.items()}
+    tg = []
+    tids = sorted(true_of.values())
+    for a_i in range(len(tids)):
+        for b_i in range(a_i + 1, len(tids)):
+            ta, tb = tids[a_i], tids[b_i]
+            ov = len(key_sets[ta] & key_sets[tb])
+            if ov <= 0:
+                continue
+            ea, eb = truth["episodes"][ta], truth["episodes"][tb]
+            tg.append({"det_a": inv[ta], "det_b": inv[tb], "true_overlap": ov,
+                       "a_true_start": min(ea["keys"]), "b_true_start": min(eb["keys"]),
+                       "a_m": len(ea["keys"]), "b_m": len(eb["keys"]),
+                       "round_gap": abs(ea["start_round"] - eb["start_round"])})
+    if tg:
+        with (args.outdir / "true_overlap_graph.csv").open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(tg[0].keys()))
+            w.writeheader(); w.writerows(tg)
 
     # The burst control's pair features: any episode pair there is noise by
     # construction (same schedule and sizes, random keys), so its quantiles are

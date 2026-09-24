@@ -1,0 +1,27 @@
+# F2: which pair feature separates true overlap from background chains?
+
+trace `sliding_seed7_waffle.tsv`; scorable pairs 121 (12 true, 109 false); flush mode 81, detected episodes 78.
+
+Labels RANK the features here; they do not set any threshold.
+
+| feature | AUC | |AUC-0.5|+0.5 | direction | median (true) | median (false) |
+| --- | --- | --- | --- | --- | --- |
+| `poisson_z_max_cell` | 0.875 | 0.875 | high=true | 32.4062 | 2.5534 |
+| `obs_over_exp` | 0.87 | 0.87 | high=true | 4.0249 | 2.2032 |
+| `poisson_z_total` | 0.859 | 0.859 | high=true | 14.6259 | 3.1477 |
+| `excess_mass` | 0.857 | 0.857 | high=true | 62.8765 | 6.4815 |
+| `max_cell` **(baseline)** | 0.854 | 0.854 | high=true | 31.5 | 4.0 |
+| `mass_per_child_batch` | 0.851 | 0.851 | high=true | 16.5 | 2.75 |
+| `max_cell_over_min_miss` | 0.847 | 0.847 | high=true | 0.1922 | 0.0239 |
+| `mass` **(baseline)** | 0.841 | 0.841 | high=true | 86.5 | 11.0 |
+| `mass_over_evict_writes` | 0.837 | 0.837 | high=true | 0.0356 | 0.0039 |
+| `mass_over_min_read_mass` | 0.826 | 0.826 | high=true | 0.1503 | 0.0215 |
+| `mass_over_min_miss_mass` | 0.821 | 0.821 | high=true | 0.4553 | 0.0724 |
+| `n_dist` | 0.737 | 0.737 | high=true | 19.0 | 5.0 |
+| `alpha_min` | 0.273 | 0.727 | low=true | 27.0 | 69.0 |
+| `gap` | 0.279 | 0.721 | low=true | 41.5 | 84.0 |
+| `exp_mass` | 0.709 | 0.709 | high=true | 20.4198 | 4.6173 |
+| `alpha_mean` | 0.398 | 0.602 | low=true | 39.327 | 71.8571 |
+| `peak_frac` | 0.581 | 0.581 | high=true | 0.4348 | 0.3529 |
+| `dist_entropy` | 0.529 | 0.529 | high=true | 2.9198 | 2.1972 |
+| `alpha_sd` | 0.524 | 0.524 | high=true | 4.394 | 1.7262 |

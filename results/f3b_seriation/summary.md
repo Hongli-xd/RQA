@@ -10,14 +10,14 @@ Components smaller than 4 nodes are dropped: chance dominates them.
 
 | arm | comps | episodes ordered | largest comp | pair concordance | permutation null | above null |
 | --- | --- | --- | --- | --- | --- | --- |
-| baseline gate, mass weights | 23 | 167 | 18 | 0.675 | 0.616 | **+0.059** |
-| baseline gate, topology only | 23 | 167 | 18 | 0.669 | 0.617 | **+0.052** |
-| baseline gate, weights SHUFFLED (null) | 23 | 167 | 18 | 0.669 | 0.616 | **+0.053** |
-| poisson gate, excess weights | 14 | 72 | 10 | 0.736 | 0.662 | **+0.074** |
-| poisson gate, topology only | 14 | 72 | 10 | 0.712 | 0.665 | **+0.047** |
-| poisson gate, weights SHUFFLED (null) | 14 | 72 | 10 | 0.725 | 0.667 | **+0.058** |
-| ORACLE among candidates | 9 | 47 | 11 | 0.734 | 0.660 | **+0.073** |
-| ORACLE full true graph | 18 | 120 | 13 | 0.899 | 0.618 | **+0.281** |
+| baseline gate, mass weights | 8 | 233 | 80 | 1.000 | 0.545 | **+0.455** |
+| baseline gate, topology only | 8 | 233 | 80 | 1.000 | 0.544 | **+0.456** |
+| baseline gate, weights SHUFFLED (null) | 8 | 233 | 80 | 1.000 | 0.545 | **+0.455** |
+| poisson gate, excess weights | 8 | 233 | 80 | 1.000 | 0.544 | **+0.456** |
+| poisson gate, topology only | 8 | 233 | 80 | 1.000 | 0.544 | **+0.456** |
+| poisson gate, weights SHUFFLED (null) | 8 | 233 | 80 | 1.000 | 0.544 | **+0.456** |
+| ORACLE among candidates | 6 | 233 | 80 | 1.000 | 0.539 | **+0.460** |
+| ORACLE full true graph | 5 | 233 | 80 | 1.000 | 0.537 | **+0.463** |
 
 `pair concordance` counts node PAIRS ordered correctly, reflection-free;
 `permutation null` is the same statistic on random orders of the SAME
