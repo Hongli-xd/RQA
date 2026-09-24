@@ -675,28 +675,25 @@ def stage_c_cardinality(
     return rows
 
 
-def stage_d_tracking(
+def _episode_pair_cells(
     inc: Incarnations,
     episodes: Sequence[Sequence[int]],
-    control_inc: Incarnations,
-    min_pair_mass: float = 8.0,
-    bg_confidence: float = 10.0,
-    max_cell: float = 4.0,
-    eviction_tail: int = 15,
-) -> dict[str, object]:
-    """Cross-incarnation tracking by exact timing arithmetic.
+    eviction_tail: int,
+) -> tuple[
+    dict[int, int],
+    dict[int, int],
+    dict[tuple[int, int], Counter[int]],
+    Counter[tuple[int, int]],
+    list[dict[str, object]],
+    int,
+]:
+    """Parent-batch attribution shared by stage_d_tracking and the
+    burst-based threshold calibration (both attack-side, no labels).
 
-    Every non-flavor read at batch t with alpha a has parent batch t-a, the
-    batch whose eviction writes produced its incarnation. LRU eviction
-    DISPERSES a range's keys over the few batches after the episode, so the
-    re-read signal is not a per-cell burst: we aggregate (parent, child)
-    cell mass into DETECTED-EPISODE-PAIR mass and keep pairs whose mass
-    exceeds both an absolute floor and a background-expected multiple,
-    where the background expectation per cell comes from the control run
-    (server-visible, no ground truth). Per-id links are kept only where
-    the parent batch has a single candidate write - the honest boundary of
-    id-level tracking under wide eviction cohorts.
-    """
+    Returns (episode_of_batch, parent_episode_of, episode_pair_cells_mass,
+    pair_mass, links_unique, ambiguous_reads) where
+    episode_pair_cells_mass maps (parent_episode, child_episode) ->
+    Counter(batch distance -> mass)."""
     episode_of_batch: dict[int, int] = {}
     for ep_id, batches in enumerate(episodes):
         for b in batches:
@@ -726,9 +723,6 @@ def stage_d_tracking(
         else:
             ambiguous_reads += 1
 
-    episode_pair_end: dict[int, int] = {
-        ep_id: max(batches) for ep_id, batches in enumerate(episodes)
-    }
     parent_episode_of: dict[int, int] = dict(episode_of_batch)
     # Widen parent attribution: an episode's keys are evicted by the first
     # batches AFTER its drain span (LRU tail), so a parent batch belongs to
@@ -754,6 +748,133 @@ def stage_d_tracking(
         if i is not None and j is not None and i != j:
             return (i, j)
         return None
+
+    episode_pair_cells_mass: dict[tuple[int, int], Counter[int]] = defaultdict(Counter)
+    for (p, t), c in pair_mass.items():
+        pair = ep_pair_of(p, t)
+        if pair is not None:
+            episode_pair_cells_mass[pair][t - p] += c
+    return (
+        episode_of_batch,
+        parent_episode_of,
+        episode_pair_cells_mass,
+        pair_mass,
+        links_unique,
+        ambiguous_reads,
+    )
+
+
+def stage_d_pair_distribution(
+    inc: Incarnations,
+    episodes: Sequence[Sequence[int]],
+    eviction_tail: int = 15,
+) -> list[tuple[int, int]]:
+    """Server-visible distribution of per-episode-pair (total mass,
+    max cell) BEFORE thresholding - the noise calibration signal."""
+    _, _, cells, _, _, _ = _episode_pair_cells(inc, episodes, eviction_tail)
+    return [(sum(c.values()), max(c.values())) for c in cells.values()]
+
+
+def stage_d_calibrate(
+    burst_inc: Incarnations,
+    burst_detected: Sequence[Sequence[int]],
+    eviction_tail: int = 15,
+    mass_quantile: float = 0.10,
+    cell_quantile: float = 0.99,
+    floor_min_mass: float = 8.0,
+    floor_max_cell: float = 4.0,
+) -> dict[str, dict[str, float]]:
+    """Calibrate the concentration thresholds from the point-burst control
+    run (same schedule and sizes, RANDOM keys): every episode-pair aggregate
+    observed there is background/coincidence noise by construction, so
+    quantiles of its (mass, cell) distribution place the attack's thresholds
+    relative to pure noise.  Uses ONLY server-visible data: the burst trace,
+    the attack's own detections on it, and eviction_tail - no range-episode
+    ground truth is read.  Thresholds are floored at the previous defaults,
+    never loosened.
+
+    Returns two candidate rules plus the calibration statistics:
+      R1_noise_envelope - reject ~1-cell_quantile of noise in BOTH
+        dimensions: mass >= q(cell_quantile) AND cell >= q(cell_quantile).
+      R2_conditional_mass - two-stage: keep the concentration gate at its
+        floor (cell >= floor), and set the mass floor at mass_quantile of
+        the noise mass distribution CONDITIONAL on passing the cell gate
+        (the noise the mass gate actually has to reject).
+    """
+    dist = stage_d_pair_distribution(burst_inc, burst_detected, eviction_tail)
+
+    def pct(values: Sequence[float], q: float) -> float:
+        ordered = sorted(values)
+        return float(ordered[min(len(ordered) - 1, round((len(ordered) - 1) * q))])
+
+    if not dist:
+        empty = {"min_pair_mass": floor_min_mass, "max_cell": floor_max_cell}
+        return {
+            "R1_noise_envelope": dict(empty),
+            "R2_conditional_mass": dict(empty),
+            "stats": {"n_burst_pairs": 0.0},
+        }
+
+    masses = [m for m, _ in dist]
+    cell_maxes = [c for _, c in dist]
+    surviving = [m for m, c in dist if c >= floor_max_cell]
+    stats = {
+        "n_burst_pairs": float(len(dist)),
+        "n_burst_pairs_cell_gate": float(len(surviving)),
+        "mass_q50": pct(masses, 0.5),
+        "mass_q99": pct(masses, 0.99),
+        "cell_q99": pct(cell_maxes, 0.99),
+        "cell_max": max(cell_maxes),
+        "cond_mass_q10": pct(surviving, mass_quantile) if surviving else floor_min_mass,
+        "mass_quantile": mass_quantile,
+        "cell_quantile": cell_quantile,
+    }
+    return {
+        "R1_noise_envelope": {
+            "min_pair_mass": max(floor_min_mass, pct(masses, cell_quantile)),
+            "max_cell": max(floor_max_cell, pct(cell_maxes, cell_quantile)),
+        },
+        "R2_conditional_mass": {
+            "min_pair_mass": max(
+                floor_min_mass,
+                pct(surviving, mass_quantile) if surviving else floor_min_mass,
+            ),
+            "max_cell": floor_max_cell,
+        },
+        "stats": stats,
+    }
+
+
+def stage_d_tracking(
+    inc: Incarnations,
+    episodes: Sequence[Sequence[int]],
+    control_inc: Incarnations,
+    min_pair_mass: float = 8.0,
+    bg_confidence: float = 10.0,
+    max_cell: float = 4.0,
+    eviction_tail: int = 15,
+) -> dict[str, object]:
+    """Cross-incarnation tracking by exact timing arithmetic.
+
+    Every non-flavor read at batch t with alpha a has parent batch t-a, the
+    batch whose eviction writes produced its incarnation. LRU eviction
+    DISPERSES a range's keys over the few batches after the episode, so the
+    re-read signal is not a per-cell burst: we aggregate (parent, child)
+    cell mass into DETECTED-EPISODE-PAIR mass and keep pairs whose mass
+    exceeds both an absolute floor and a background-expected multiple,
+    where the background expectation per cell comes from the control run
+    (server-visible, no ground truth). Per-id links are kept only where
+    the parent batch has a single candidate write - the honest boundary of
+    id-level tracking under wide eviction cohorts.
+    """
+    (
+        _,
+        _,
+        episode_pair_cells_mass,
+        pair_mass,
+        links_unique,
+        ambiguous_reads,
+    ) = _episode_pair_cells(inc, episodes, eviction_tail)
 
     # Background expectation per (parent, child) cell from the control run,
     # indexed by batch DISTANCE t-p: background re-reads have a lag profile,
@@ -783,11 +904,6 @@ def stage_d_tracking(
 
     # Aggregate cells into detected-episode-pair mass (keeping per-cell
     # values for the concentration rule).
-    episode_pair_cells_mass: dict[tuple[int, int], Counter[int]] = defaultdict(Counter)
-    for (p, t), c in pair_mass.items():
-        pair = ep_pair_of(p, t)
-        if pair is not None:
-            episode_pair_cells_mass[pair][t - p] += c
     overlap: dict[str, float] = {}
     for (i, j), per_dist in episode_pair_cells_mass.items():
         per_cell = [c for c in per_dist.values()]
@@ -1123,6 +1239,47 @@ def eval_e(
             boundary[str(gap)][0] += 1
             boundary[str(gap)][1] += hit
             boundary_pairs.append([float(gap), float(hit), float(ov)])
+
+    # Overlap-pair DETECTION quality (in addition to the recovery curve
+    # above): a true pair is a matched episode pair with true key
+    # intersection >= 30; an estimated positive is a pair with matrix > 0.
+    # Reported for ALL pairs and restricted to pairs INSIDE the leakage
+    # window (gap <= window estimate from the boundary curve).
+    window_est = max(
+        (float(k) for k, v in boundary.items() if v[0] and v[1] / v[0] >= 0.5),
+        default=0.0,
+    )
+    conf: dict[str, dict[str, float]] = {
+        "all": {"tp": 0.0, "fp": 0.0, "fn": 0.0},
+        "within_window": {"tp": 0.0, "fp": 0.0, "fn": 0.0},
+    }
+    for det_i in det_ids:
+        for det_j in det_ids:
+            if det_i >= det_j:
+                continue
+            ti, tj = true_of[det_i], true_of[det_j]
+            ov = len(key_sets[ti] & key_sets[tj])
+            est = matrix[det_i][det_j] > 0 or matrix[det_j][det_i] > 0
+            gap = starts[tj] - starts[ti]
+            groups = ["all"] + (["within_window"] if gap <= window_est else [])
+            for g in groups:
+                if ov >= 30 and est:
+                    conf[g]["tp"] += 1
+                elif ov >= 30:
+                    conf[g]["fn"] += 1
+                elif est:
+                    conf[g]["fp"] += 1
+    pair_metrics: dict[str, dict[str, float]] = {}
+    for g, c in conf.items():
+        tp, fp, fn = c["tp"], c["fp"], c["fn"]
+        precision = tp / max(1.0, tp + fp)
+        recall = tp / max(1.0, tp + fn)
+        pair_metrics[g] = {
+            "tp": tp, "fp": fp, "fn": fn,
+            "precision": precision,
+            "recall": recall,
+            "f1": 2 * precision * recall / max(1e-9, precision + recall),
+        }
     return {
         "scored_dim": float(len(det_ids)),
         "pearson": pear,
@@ -1136,6 +1293,8 @@ def eval_e(
         "boundary_by_gap": {k: tuple(v) for k, v in sorted(
             boundary.items(), key=lambda kv: float(kv[0]))},
         "boundary_pairs": boundary_pairs,
+        "window_est": window_est,
+        "overlap_pair_metrics": pair_metrics,
     }
 
 
