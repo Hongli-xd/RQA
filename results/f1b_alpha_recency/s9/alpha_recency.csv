@@ -1,0 +1,2 @@
+tau,spike,spike_bg_height,episodes,eval_ceiling_rho,E1_frac_rho,E2_excess_rho,E2_excess_r,E2_null_shuffled_rho,E2_burst_control_rho,burst_episodes
+20,79-83,1231,80,0.419,0.327,0.466,0.788,-0.091,0.638,80

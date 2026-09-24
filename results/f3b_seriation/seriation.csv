@@ -1,0 +1,25 @@
+seed_dir,arm,poisson_threshold,components,nodes_ordered,max_comp,concordance,null_concordance,above_null
+s7,"baseline gate, mass weights",4.426,4,76,37,1.0,0.558,0.442
+s7,"baseline gate, topology only",4.426,4,76,37,1.0,0.557,0.443
+s7,"baseline gate, weights SHUFFLED (null)",4.426,4,76,37,1.0,0.556,0.444
+s7,"poisson gate, excess weights",4.426,4,76,37,1.0,0.556,0.444
+s7,"poisson gate, topology only",4.426,4,76,37,1.0,0.552,0.448
+s7,"poisson gate, weights SHUFFLED (null)",4.426,4,76,37,1.0,0.554,0.446
+s7,ORACLE among candidates,4.426,3,76,48,0.999,0.544,0.455
+s7,ORACLE full true graph,4.426,3,76,48,0.999,0.548,0.451
+s8,"baseline gate, mass weights",4.03,1,80,80,1.0,0.529,0.471
+s8,"baseline gate, topology only",4.03,1,80,80,1.0,0.529,0.471
+s8,"baseline gate, weights SHUFFLED (null)",4.03,1,80,80,1.0,0.532,0.468
+s8,"poisson gate, excess weights",4.03,1,80,80,1.0,0.53,0.47
+s8,"poisson gate, topology only",4.03,1,80,80,1.0,0.532,0.468
+s8,"poisson gate, weights SHUFFLED (null)",4.03,1,80,80,1.0,0.531,0.469
+s8,ORACLE among candidates,4.03,1,80,80,1.0,0.531,0.469
+s8,ORACLE full true graph,4.03,1,80,80,1.0,0.53,0.47
+s9,"baseline gate, mass weights",4.191,3,77,45,1.0,0.548,0.452
+s9,"baseline gate, topology only",4.191,3,77,45,1.0,0.547,0.453
+s9,"baseline gate, weights SHUFFLED (null)",4.191,3,77,45,1.0,0.547,0.453
+s9,"poisson gate, excess weights",4.191,3,77,45,1.0,0.545,0.455
+s9,"poisson gate, topology only",4.191,3,77,45,1.0,0.549,0.451
+s9,"poisson gate, weights SHUFFLED (null)",4.191,3,77,45,1.0,0.548,0.452
+s9,ORACLE among candidates,4.191,2,77,45,1.0,0.543,0.457
+s9,ORACLE full true graph,4.191,1,77,77,1.0,0.533,0.467
